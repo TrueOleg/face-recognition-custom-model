@@ -43,9 +43,6 @@ retval = os.getcwd()
 print("[>>SLD MODEL<<] Current working directory %s" % retval, \
       "__NAME__ = ", __name__)
 
-from LooksLikeWho.SLD_tools import *
-from LooksLikeWho.SLD_quad_model import *
-
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -75,7 +72,8 @@ from tensorflow.keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, \
 from tensorflow.keras.utils import to_categorical  #EDITSLD
 from tensorflow.keras import models
 from tensorflow.keras.layers import Lambda, Layer
-
+from tensorflow.keras.losses import BinaryCrossentropy
+print('Model', Model)
 # from sklearn.model_selection import train_test_split
 # from sklearn.metrics import accuracy_score
 # from sklearn.utils import class_weight
@@ -92,7 +90,7 @@ memory_issues=False   # True if GPU memory issues ("failed to allocate" / OOM)
 disable_gpu=False     # True if above setting is not sufficient
 
 ## Generate train/test set
-generate_train_test_sets=False  # True to gen train/test set, run only once
+generate_train_test_sets=True  # True to gen train/test set, run only once
 
 ## Select data set (select only one amongst choices)
 dataset_tag = "_litecropped" # 2 x 10 x 4
@@ -151,6 +149,110 @@ models_weight_paths=[
     r".\models\weights\facenet_keras_weights.h5"
 ]
 
+
+class OneShotMetricsQuad(CB):
+    '''
+    A custom callback to compute metrics that are very specific to siamese
+    network.
+
+    Arguments:
+        network: encoder network.
+        metricnetwork: similarity function.
+        N: (deprecated) Number of samples to use when testing an image,
+            now all are used.
+        k: number of tests to run per epoch, should be 1 if predict is 1
+        gen: (deprecated) Generated test batches.
+        train_data: train data (numpy array), the reference image will be
+            compared to all images contained in that array
+        train_labels: train labels (numpy array)
+        test_data: test data (numpy array), the reference image will be drawn
+            amongst images contained in that array
+        test_labels: test labels (numpy array)
+        realistic_method: "max" or "average". Decide how the predicted class
+            will be computed, by either selecting the class corresponding to
+            the image with the smallest distance ("min"), or by selecting the
+            class whose top 3 matches have the smallest average ("average").
+
+    Outputs:
+        A 'train' metric is computed using 1 sample from the train set vs. all
+        samples from the train set, with the expectations of a high accuracy.
+        A 'realistic' metric is computed using 1 sample from the test set vs.
+        all samples from the train set, with the expectations real-world
+        accuracy.
+        All metrics are saved to 'logs'.
+        Live metrics are also printed to the console during training.
+    '''
+
+    def __init__(self, network, metricnetwork, N, k, gen, test_data, \
+                 test_labels, train_data, train_labels, realistic_method):
+        print('tttttttt111111111111111')
+        self.gen=gen
+        self.test_data=test_data
+        self.test_labels=test_labels
+        self.train_data=train_data
+        self.train_labels=train_labels
+        self.k=k
+        self.N=N
+        self.metricnetwork=metricnetwork
+        self.network=network
+        self.realistic_method=realistic_method
+
+    def on_train_begin(self, logs={}):
+        print('tttttttt2222222222')
+        # N-way one-shot learning accuracy
+        self.one_shot_accuracy_train = []
+        self.one_shot_accuracy_realistic = []
+        self.one_shot_loss_train = []
+        self.one_shot_loss_realistic = []
+        self.one_shot_exact_matches_train = []
+        self.one_shot_exact_matches_realistic = []
+
+    def on_epoch_end(self, epoch, logs):
+
+        print('tttttttt333333333')
+        time_start_epoch_eval = time.time()
+        print(" ")
+        #gc.collect()
+        percent_correct_train, loss_train, exact_matches_train= \
+            compute_learned_dist_one_vs_all(network=self.network, \
+                                            metricnetwork=self.metricnetwork, k=self.k, train_data=self.train_data, \
+                                            train_labels=self.train_labels, test_data=self.train_data , test_labels=self.train_labels, \
+                                            also_get_loss=1, verbose = 1, label="train", method=self.realistic_method)
+
+        percent_correct_realistic, loss_realistic, exact_matches_realistic= \
+            compute_learned_dist_one_vs_all(network=self.network, \
+                                            metricnetwork=self.metricnetwork, k=self.k, train_data=self.train_data, \
+                                            train_labels=self.train_labels, test_data=self.test_data , test_labels=self.test_labels, \
+                                            also_get_loss=1, verbose = 1, label="realistic", method=self.realistic_method)
+
+        osa_train=percent_correct_train/100 # return a fraction and not a percentage
+        osa_realistic=percent_correct_realistic/100 # return a fraction and not a percentage
+        self.one_shot_accuracy_train.append(osa_train)
+        self.one_shot_accuracy_realistic.append(osa_realistic)
+        self.one_shot_loss_train.append(loss_train)
+        self.one_shot_loss_realistic.append(loss_realistic)
+        self.one_shot_exact_matches_train.append(exact_matches_train/100)
+        self.one_shot_exact_matches_realistic.append(exact_matches_realistic/100)
+        logs['one_shot_accuracy_train']=osa_train
+        logs['one_shot_accuracy_realistic']=osa_realistic
+        logs['one_shot_loss_train']=loss_train
+        logs['one_shot_loss_realistic']=loss_realistic
+        logs['one_shot_exact_matches_train']=exact_matches_train/100
+        logs['one_shot_exact_matches_realistic']=exact_matches_realistic/100
+        m, s = divmod(time.time()-time_start_epoch_eval, 60)
+        h, m = divmod(m, 60)
+        runtime = "%03d:%02d:%02d"%(h, m, s)
+        print("Epoch evaluation runtime: ", runtime, "\n")
+        print("*****SUMMARY*****:")
+        print("Average of score for the train set:     {}%.    (100% is best, \
+              0% is worst)".format(str(round(percent_correct_train,0))))
+        print("Average of score for the realistic set: {}%.    (100% is best, \
+              0% is worst)".format(str(round(percent_correct_realistic,0))))
+        print('\n\n')
+        gc.collect()
+        return None
+
+
 class QuadrupletLossLayer(Layer):
     '''
     A custom tf.keras layer that computes the quadruplet loss from distances
@@ -177,7 +279,7 @@ class QuadrupletLossLayer(Layer):
     def __init__(self, alpha, beta, **kwargs):
         self.alpha = alpha
         self.beta = beta
-
+        print('111111111111111')
         super(QuadrupletLossLayer, self).__init__(**kwargs)
 
     def quadruplet_loss(self, inputs):
@@ -187,15 +289,18 @@ class QuadrupletLossLayer(Layer):
         ap_dist2 = K.square(ap_dist)
         an_dist2 = K.square(an_dist)
         nn_dist2 = K.square(nn_dist)
+        print('2222222222222222')
 
         return (K.sum(K.maximum(ap_dist2 - an_dist2 + self.alpha, 0), axis=0) + K.sum(K.maximum(ap_dist2 - nn_dist2 + self.beta, 0), axis=0)) / BATCH_SIZE
 
     def call(self, inputs):
         loss = self.quadruplet_loss(inputs)
         self.add_loss(loss)
+        print('333333333333333')
         return loss
 
     def get_config(self):
+        print('444444444444')
         config = super().get_config().copy()
         config.update({
             'alpha': self.alpha,
@@ -203,6 +308,347 @@ class QuadrupletLossLayer(Layer):
         })
         return config
 
+
+def make_oneshot_task_realistic(train_data, train_labels, test_data=None, \
+                                test_labels=None, output_labels=0, predict=1, \
+                                predict_model_name=None, image=None):
+    '''
+    Create batch of pairs, one sample from the test set versus ALL samples in ALL classes of train set.
+
+    Arguments:
+        train_data: train data (numpy array), the reference image will be compared
+            to all images contained in that array
+        train_labels: train labels (numpy array)
+        test_data: test data (numpy array), the reference image will be drawn
+            amongst images contained in that array, unless 'image' is provided.
+        test_labels: test labels (numpy array)
+        output_labels: option to print out labels when testing
+        predict: 0 if the function is used for in-training testing,
+                 1 if the function is used for predictions
+        predict_model_name: if predict is 1, name of the 1st encoder. This is
+            to avoid the use of too many global variables.
+        image: a np array representation of an input image, when predict is 1
+
+    Outputs:
+        pairs, actual_categories_1 if predict = 1
+        pairs, targets if predict = 0 and output_labels = 1
+        pairs, targets, actual_categories_1 if predict = 0 and output_labels = 0
+        with:
+            pairs: list of two tensors, one for the tested image (repeated as
+                needed), one for the train set.
+            targets: when the class of the tested image is known, target is a
+                vector containing 1 where the train set is of the same class,
+                0 otherwise.
+            actual_categories_1: returns classes for the train set.
+    '''
+
+    # Obtain the model name differently if running for prediction or not
+    if predict:
+        model_name = predict_model_name
+    else:
+        model_name = MODEL_BASE_TAG
+
+    if len(train_labels.shape)==1:
+        # AWS one dimension format
+        n_classes=np.unique(train_labels).shape[0]
+    else:
+        # dense matrix format
+        n_classes=train_labels.shape[1]
+
+    if model_name == 'FaceNet':
+        # print(train_data.shape)
+        n_examples,features=train_data.shape
+    else:
+        n_examples,features,t,channels=train_data.shape
+
+    # Select the category whose sample is going to be drawn from
+    category = rng.randint(0,n_classes)
+
+    # initialize 2 empty arrays for the input image batch
+    if model_name == 'FaceNet':
+        pairs=[np.zeros((n_examples, features)) for i in range(2)]
+    else:
+        pairs=[np.zeros((n_examples, features, t, channels)) for i in range(2)]
+
+    # initialize vector for the targets
+    targets=np.zeros((n_examples,))
+
+    # Save actually categories for information
+    actual_categories_0=np.zeros((n_examples,))
+    actual_categories_1=np.zeros((n_examples,))
+
+    # Targets are one for same class.
+    if len(train_labels.shape)==1:
+        # AWS one dimension format
+        targets[train_labels==category]=1
+    else:
+        # dense matrix format
+        targets[train_labels[:,category]==1]=1
+
+    # Select a random test image from the selected category
+    if not predict:
+        if model_name == 'FaceNet':
+            subset0_test = test_data[test_labels[:,category]==1,:]
+        else:
+            subset0_test = test_data[test_labels[:,category]==1,:,:,:]
+        nb_available_samples0_test=subset0_test.shape[0]
+        idx_1_test = rng.randint(0, nb_available_samples0_test)
+        sample_image = subset0_test[idx_1_test]
+    elif predict:
+        sample_image=image
+
+    if model_name == 'FaceNet':
+        pairs[0][:,:] = sample_image
+        actual_categories_0[:] = category
+        # actual_id_0[:] = idx_1_test
+
+        pairs[1][:,:] = train_data
+        if len(train_labels.shape)==1:
+            # AWS one dimension format
+            actual_categories_1[:] = train_labels
+        else:
+            # dense matrix format
+            actual_categories_1[:] = np.argmax(train_labels, axis=1)
+        # actual_id_1[:] =
+    else:
+        pairs[0][:,:,:,:] = sample_image
+        actual_categories_0[:] = category
+        # actual_id_0[:] = idx_1_test
+
+        pairs[1][:,:,:,:] = train_data
+        if len(train_labels.shape)==1:
+            # AWS one dimension format
+            actual_categories_1[:] = train_labels
+        else:
+            # dense matrix format
+            actual_categories_1[:] = np.argmax(train_labels, axis=1)
+        # actual_id_1[:] =
+
+    if predict:
+        return pairs, actual_categories_1
+
+    if output_labels==0:
+        return pairs, targets
+    elif output_labels==1:
+        return pairs, targets, actual_categories_1
+
+
+def compute_learned_dist_one_vs_all(network, metricnetwork, k, train_data, \
+                                    train_labels, test_data=None, test_labels=None, output_labels=1, \
+                                    also_get_loss=0, verbose = 1, label="realistic", method="max", \
+                                    predict=0, predict_model_name=None, image=None):
+
+    '''
+    This function computes the distance (similarity) between one image, either
+    randomly selected from train_data or provided using the'image' argument.
+
+    Arguments:
+        network: encoder network
+        metricnetwork: similarity function
+        k: number of tests, should be 1 if predict is 1
+        train_data: train data (numpy array), the reference image will be compared
+            to all images contained in that array
+        train_labels: train labels (numpy array)
+        test_data: test data (numpy array), the reference image will be drawn
+            amongst images contained in that array
+        test_labels: test labels (numpy array)
+        output_labels: option to print out labels when testing
+        also_get_loss: option to also compute a classic binary cross entripy loss
+        verbose: option to print out details about the execution of the code
+        label: name of the type of testing done. Only use for console prints.
+        method: "max" or "average". Decide how the predicted class will be computed,
+            by either selecting the class corresponding to the image with the smallest
+            distance ("min"), or by selectong the class whose top 3 matches have the
+            smallest average ("average").
+        predict: 0 if the function is used for in-training testing,
+            1 if the function is used for predictions
+        predict_model_name: if predict is 1, name of the 1st encoder. This is
+            to avoid the use of too many global variables.
+        image: a np array representation of an input image, when predict is 1
+
+
+    Outputs:
+        if predict = 1:
+            predicted_cat: the predicted classs
+            distance: the corresponding distance
+            actual_image_index: the index of the matchig image in the train data
+            sorted_predicted_cats: an array of all the predicted_cats, sorted
+                by best match to worse match
+            sorted_distances: an array of all the predicted distances, sorted
+                by best match to worse match
+            sorted_actual_image_index: an array of all images indexes, sorted
+                by best match to worse match
+        if predict = 0:
+                percent_correct: a custom metrics. For each one of the k tests,
+                    the ground truth class is compared to its position in the
+                    sorted predicted classes of the model. For instance, if the
+                    grond truth class is 3, and the model predicts 2, 3, 4, 1,
+                    the percent correct will be 75%. That number is averagged
+                    over all k examples. It gives an idea if a model is improving
+                    or not, as it's a more granular metric that the exact_match
+                    one below.
+                loss: binary cross entropy loss
+                exact_matches: out of the k tests, the percentage of predictions
+                    that were exact.
+
+    '''
+
+    if predict and k!=1:
+        raise Exception("Cannot predict on more than one sample.")
+
+    n_correct = 0
+    if verbose:
+        print("Evaluating model with ({}) 1 test sample vs. all train samples\
+              using the {} method...".format(str(k), method))
+
+    if also_get_loss:
+        bce = BinaryCrossentropy()
+        loss=0
+
+    rk_pct_total=0
+
+    if not predict:
+        print("Rounds completed:", end="\n")
+
+    for i in range(k):
+        gc.collect()
+        if predict:
+            pairs, actual_categories = make_oneshot_task_realistic(train_data, \
+                                                                   train_labels, output_labels=1, predict=1, \
+                                                                   predict_model_name=predict_model_name, image=image)
+        else:
+            pairs, targets, actual_categories = make_oneshot_task_realistic( \
+                train_data, train_labels, test_data, test_labels, \
+                output_labels=1, predict=0)
+        gc.collect()
+
+        # Get embeddings for the test image
+        test_image_embeddings=network.predict(np.expand_dims(pairs[0][0], axis=0))
+
+        # Create an array to store all embeddings
+        m = pairs[0].shape[0] # number of comparison to make
+        embeddingsize = test_image_embeddings.shape[1]
+        embeddings = np.zeros((m, embeddingsize*2))
+
+        train_set_embeddings=network.predict(pairs[1])
+        embeddings[:,embeddingsize:]=train_set_embeddings
+        embeddings[:,:embeddingsize]=test_image_embeddings
+
+        # Get distances
+        distances = metricnetwork(embeddings)
+        distances=np.array(distances)
+        # print(type(distances))
+        # print(distances.shape)
+        last_correct=False
+        del embeddings
+        del pairs
+
+        if method=="min":
+            if not predict:
+                if np.argmin(distances) in np.argwhere(targets == np.amax(targets)):
+                    n_correct+=1
+                    last_correct=True
+            elif predict:
+                arg_min_d=np.argmin(distances)
+                predicted_cat=int(actual_categories[arg_min_d])
+                distance=np.amin(distances)
+                actual_image_index=arg_min_d # No need to invoke ORDERS, train not shuffled for predict
+
+                # Rank all results
+                sorted_actual_image_index = np.argsort(distances)
+                print(type(sorted_actual_image_index))
+                print(sorted_actual_image_index)
+                sorted_distances = distances[sorted_actual_image_index]
+                sorted_predicted_cats = actual_categories[sorted_actual_image_index].astype(int)
+
+        elif method=="average":
+            # Compute the average per class of the smallest 3 distances
+            avg_per_class=np.zeros(len(np.unique(actual_categories)))
+            unsorted_actual_image_index=np.zeros(len(np.unique(actual_categories)))
+            print_i=0
+            s_dist = np.argsort(distances) # <--- sort only one time the whole array
+            for i in range(avg_per_class.shape[0]):
+                mask=actual_categories==i
+                sorted_absolute_arguments_this_class=s_dist[mask[s_dist]]
+                unsorted_actual_image_index[i]=int(sorted_absolute_arguments_this_class[0])
+                sorted_distances_this_class=distances[s_dist][mask[s_dist]]
+                avg_per_class[i]=np.average(sorted_distances_this_class[:3])
+                if print_i <= 30:
+                    # print(mask)
+                    # print(sorted_absolute_arguments_this_class)
+                    # print(sorted_distances_this_class)
+                    # print(avg_per_class[i])
+                    print_i+=1
+
+            sorted_predicted_cats = np.argsort(avg_per_class) # <--- categories where the average is the lowest
+            sorted_actual_image_index=unsorted_actual_image_index[sorted_predicted_cats].astype(int) # <--- absolute index of the image with the lowest distance for a given class
+            sorted_distances = avg_per_class[sorted_predicted_cats] # <---
+
+            predicted_cat = int(np.argmin(avg_per_class))
+            distance=np.min(distances[actual_categories==predicted_cat])
+            if predict:
+                actual_image_index = np.where(np.logical_and(actual_categories==predicted_cat, distances==distance))[0][0] # No need to invoke ORDERS, train not shuffled for predict
+            if not predict:
+                rk_array = avg_per_class.argsort()
+                target_cat = int(actual_categories[np.argmax(targets)])
+                rk_pct=100*np.where(rk_array==target_cat)[0][0]/avg_per_class.shape[0]
+                rk_pct_total+=rk_pct
+                print("Rank percentage =", round(100-rk_pct,2), end=" ")
+                if predicted_cat == target_cat:
+                    n_correct+=1
+                    last_correct=True
+                else: # not correct
+                    pass #no further action needed
+
+        else:
+            raise Exception("Wrong selection technique.")
+
+        if predict:
+            print('SUMMARY OF PREDICTIONS')
+            print("Predicted single cat:", predicted_cat, "Predicted single distance:", \
+                  distance, "Predicted single index:", actual_image_index, \
+                  "##############################", "Predicted categories:", \
+                  sorted_predicted_cats, "Predicted distances:", sorted_distances, \
+                  "Predicted indexes:",  sorted_actual_image_index, \
+                  sep="\n")
+            # NOTE:
+            # In case of the AVERAGE technique:
+            # distance is the minimum distance within the predicted class
+            # sorted_distance is the sorted AVERAGE distance per class
+            # Therefore, it is normal than distance !=sorted_distance[0]
+            return predicted_cat, distance, actual_image_index, sorted_predicted_cats, sorted_distances, sorted_actual_image_index
+
+        if also_get_loss:
+            probs=1-distances
+            new_loss=bce(targets, probs).numpy()
+            loss+=new_loss
+
+        del probs, targets, actual_categories
+
+        #During testing, this allows to quickly see how accurate the model is.
+        if last_correct:
+            print("o")
+        else:
+            print("x")
+    print(" ")
+
+    exact_matches = (100.0 * n_correct / k)
+    percent_correct = 100-rk_pct_total/k
+
+    if verbose:
+        if label:
+            print("Got an average of {}% realistic exact matches one-shot learning accuracy on the {} set over {} repetitions.\n".format(exact_matches,label,k))
+        else:
+            print("Got an average of {}% realistic exact matches one-shot learning accuracy \n".format(exact_matches))
+
+    if method=="average":
+        print("The average scoring is {}% (0% is best, 100% is worst).".format(round(percent_correct,0)))
+
+    if also_get_loss:
+        loss=loss/k
+        return percent_correct, loss, exact_matches
+    else:
+        return percent_correct
 
 def get_what_from_full_set_with_face_crop(what, data_path_source, data_path_dest, max_samples_per_class=1,
                                           max_classes=None, target_size=(224, 224), mini_res=False):
@@ -234,151 +680,155 @@ def get_what_from_full_set_with_face_crop(what, data_path_source, data_path_dest
     detector = MTCNN()
 
     for source in [train_folder_source, test_folder_source]:
+        print('source', os.listdir(source))
         if count_classes == max_classes:
             break
         for subf in os.listdir(source):
-            if count_classes == max_classes:
-                break
-            count_classes += 1
-            imdir = os.listdir(os.path.join(source, subf))
-            random.shuffle(imdir)
-            nb_samples = max_samples_per_class
-            newimdir = imdir
-            os.makedirs(os.path.join(folder_dest, subf), exist_ok=True)
-            # Count files already in destination
-            count = len(os.listdir(os.path.join(folder_dest, subf)))
-            print("Need to transfer {} samples.".format(max(0, nb_samples - count)))
-            print(os.path.join(folder_dest, subf))
-            if count >= nb_samples:
-                total_count += count
-                continue
-            attempts = 0
-            native_res_factor = 1
-            cropped_res_factor = 1
-            confidence_factor = 1
-            while True:
-                for im in newimdir:
-                    if not os.path.exists(os.path.join(folder_dest, subf, im)) and not os.path.exists(
-                            os.path.join(other_folder_dest, subf, im)):
-                        # impath=os.path.join(folder_dest, subf, im)
-                        # shutil.copy(os.path.join(source, subf, im), impath)
-                        impath = os.path.join(source, subf, im)
-                        impath_target = os.path.join(folder_dest, subf, im)
-                        try:
-                            # img = cv2.imread(impath)
-                            img = pyplot.imread(impath)
-                            full_height, full_width, channels = img.shape
-                            print('==================', full_height, full_width)
-                            if mini_res and min(full_height, full_width) < mini_res * 2.2 * native_res_factor:
-                                # print("NATIVE RESOLUTION TOO LOW: skipping image.")
-                                continue
-                            detections = detector.detect_faces(img)
-                            print("Detections:", detections)
-                            if detections == []:
-                                print("NO FACE DETECTED: skipping image {}/{}.".format(subf, im))
-                                continue
-
-                            if detections[0]['confidence'] < 0.99 * confidence_factor:
-                                print("CONFIDENCE TOO LOW: skipping image.")
-                                continue
-                            x1, y1, width, height = detections[0]['box']
-                            current_res = min(width, height)
-                            print("Image resolution:", current_res)
-                            if mini_res and current_res < mini_res * cropped_res_factor:
-                                print("CROPPED RESOLUTION TOO LOW: skipping image.")
-                                continue
-                            # Make image square
-                            w2 = width // 2
-                            xc = x1 + w2  # X centroid
-                            h2 = height // 2
-                            yc = y1 + h2  # Y centroid
-
-                            d = max(height, width) // 2
-                            print(yc - d, yc + d, xc - d, xc + d)
-                            Y0, Y1, X0, X1 = yc - d, yc + d, xc - d, xc + d
-
-                            # Check that nothing is outside the frame
-                            check = all([
-                                Y0 >= 0,
-                                X0 >= 0,
-                                Y1 <= full_height,
-                                X1 <= full_width,
-                            ])
-
-                            if not check:
-                                print("FACE PARTIALLY SHOWN ON ORIGINAL IMAGE (TOO ZOOMED IN): skipping image.")
-                                continue
-
-                            face = img[Y0:Y1, X0:X1, ::-1]  # <--- Invert 1st and last channel
-
-                            # resize pixels to the model size
-                            face = PIL.Image.fromarray(face, mode='RGB')
-                            face = face.resize(target_size, Image.BICUBIC)
-                            # Remove original image
-                            # os.remove(impath)
-
-                            # save croppped image
-                            face.save(impath_target, "JPEG", icc_profile=face.info.get('icc_profile'))
-                            del face
-                            count += 1
-                            total_count += 1
-
-                            if count == nb_samples: break
-                        except:
-                            # delete image and try with another image
-                            # os.remove(impath)
-                            continue
-
-                if count == nb_samples:
-                    print("******************************************")
-                    print("Total Count: {} || Completion: {:.2%}.".format(total_count, total_count / (
-                            max_classes * max_samples_per_class)))
-                    print("******************************************")
+            if not subf.startswith('.'):
+                if count_classes == max_classes:
                     break
+                count_classes += 1
+                print('source, subf', source, subf)
+                imdir = os.listdir(os.path.join(source, subf))
+                random.shuffle(imdir)
+                nb_samples = max_samples_per_class
+                newimdir = imdir
+                os.makedirs(os.path.join(folder_dest, subf), exist_ok=True)
+                # Count files already in destination
+                count = len(os.listdir(os.path.join(folder_dest, subf)))
+                print("Need to transfer {} samples.".format(max(0, nb_samples - count)))
+                print(os.path.join(folder_dest, subf))
+                if count >= nb_samples:
+                    total_count += count
+                    continue
+                attempts = 0
+                native_res_factor = 1
+                cropped_res_factor = 1
+                confidence_factor = 1
+                while True:
+                    for im in newimdir:
+                        if not os.path.exists(os.path.join(folder_dest, subf, im)) and not os.path.exists(
+                                os.path.join(other_folder_dest, subf, im)):
+                            # impath=os.path.join(folder_dest, subf, im)
+                            # shutil.copy(os.path.join(source, subf, im), impath)
+                            impath = os.path.join(source, subf, im)
+                            impath_target = os.path.join(folder_dest, subf, im)
+                            try:
+                                # img = cv2.imread(impath)
+                                img = pyplot.imread(impath)
+                                full_height, full_width, channels = img.shape
+                                print('==================', full_height, full_width)
+                                if mini_res and min(full_height, full_width) < mini_res * 2.2 * native_res_factor:
+                                    # print("NATIVE RESOLUTION TOO LOW: skipping image.")
+                                    continue
+                                detections = detector.detect_faces(img)
+                                print("Detections:", detections)
+                                if detections == []:
+                                    print("NO FACE DETECTED: skipping image {}/{}.".format(subf, im))
+                                    continue
 
-                attempts += 1
-                if attempts == 1:
-                    native_res_factor = 1.05 / 2.2
-                    confidence_factor = 0.97 / 0.99
-                    print("******************************************")
-                    print("******************************************")
-                    print("**WARNING : CHECKING MORE IMAGES *********")
-                    print("******************************************")
-                    print("******************************************")
-                if attempts == 2:
-                    native_res_factor = 0.9 / 2.2
-                    cropped_res_factor = 0.75
-                    confidence_factor = 0.95 / 0.99
-                    print("*********************************************")
-                    print("********************************************")
-                    print("**WARNING : LOWER RESOLUTION MODE ENABLED **")
-                    print("********************************************")
-                    print("********************************************")
-                if attempts == 3:
-                    native_res_factor = 0.60 / 2.2
-                    cropped_res_factor = 0.50
-                    confidence_factor = 0.90 / 0.99
-                    print("***********************************************")
-                    print("***********************************************")
-                    print("**WARNING : ULTRALOW RESOLUTION MODE ENABLED **")
-                    print("***********************************************")
-                    print("***********************************************")
-                if attempts == 4:
-                    native_res_factor = 0
-                    cropped_res_factor = 0.30
-                    confidence_factor = 0.80 / 0.99
-                    print("***********************************************")
-                    print("***********************************************")
-                    print("**WARNING : LAST CHANCE ROUND !!!!!!!!!!!!!! **")
-                    print("***********************************************")
-                    print("***********************************************")
-                if attempts == 5:
-                    print("Not enough good quality images.")
-                    incomplete_classes += 1
-                    break
+                                if detections[0]['confidence'] < 0.99 * confidence_factor:
+                                    print("CONFIDENCE TOO LOW: skipping image.")
+                                    continue
+                                x1, y1, width, height = detections[0]['box']
+                                current_res = min(width, height)
+                                print("Image resolution:", current_res)
+                                if mini_res and current_res < mini_res * cropped_res_factor:
+                                    print("CROPPED RESOLUTION TOO LOW: skipping image.")
+                                    continue
+                                # Make image square
+                                w2 = width // 2
+                                xc = x1 + w2  # X centroid
+                                h2 = height // 2
+                                yc = y1 + h2  # Y centroid
+
+                                d = max(height, width) // 2
+                                print(yc - d, yc + d, xc - d, xc + d)
+                                Y0, Y1, X0, X1 = yc - d, yc + d, xc - d, xc + d
+
+                                # Check that nothing is outside the frame
+                                check = all([
+                                    Y0 >= 0,
+                                    X0 >= 0,
+                                    Y1 <= full_height,
+                                    X1 <= full_width,
+                                ])
+
+                                if not check:
+                                    print("FACE PARTIALLY SHOWN ON ORIGINAL IMAGE (TOO ZOOMED IN): skipping image.")
+                                    continue
+
+                                face = img[Y0:Y1, X0:X1, ::-1]  # <--- Invert 1st and last channel
+
+                                # resize pixels to the model size
+                                face = PIL.Image.fromarray(face, mode='RGB')
+                                face = face.resize(target_size, Image.BICUBIC)
+                                # Remove original image
+                                # os.remove(impath)
+
+                                # save croppped image
+                                face.save(impath_target, "JPEG", icc_profile=face.info.get('icc_profile'))
+                                del face
+                                count += 1
+                                total_count += 1
+
+                                if count == nb_samples: break
+                            except:
+                                # delete image and try with another image
+                                # os.remove(impath)
+                                continue
+
+                    if count == nb_samples:
+                        print("******************************************")
+                        print("Total Count: {} || Completion: {:.2%}.".format(total_count, total_count / (
+                                max_classes * max_samples_per_class)))
+                        print("******************************************")
+                        break
+
+                    attempts += 1
+                    if attempts == 1:
+                        native_res_factor = 1.05 / 2.2
+                        confidence_factor = 0.97 / 0.99
+                        print("******************************************")
+                        print("******************************************")
+                        print("**WARNING : CHECKING MORE IMAGES *********")
+                        print("******************************************")
+                        print("******************************************")
+                    if attempts == 2:
+                        native_res_factor = 0.9 / 2.2
+                        cropped_res_factor = 0.75
+                        confidence_factor = 0.95 / 0.99
+                        print("*********************************************")
+                        print("********************************************")
+                        print("**WARNING : LOWER RESOLUTION MODE ENABLED **")
+                        print("********************************************")
+                        print("********************************************")
+                    if attempts == 3:
+                        native_res_factor = 0.60 / 2.2
+                        cropped_res_factor = 0.50
+                        confidence_factor = 0.90 / 0.99
+                        print("***********************************************")
+                        print("***********************************************")
+                        print("**WARNING : ULTRALOW RESOLUTION MODE ENABLED **")
+                        print("***********************************************")
+                        print("***********************************************")
+                    if attempts == 4:
+                        native_res_factor = 0
+                        cropped_res_factor = 0.30
+                        confidence_factor = 0.80 / 0.99
+                        print("***********************************************")
+                        print("***********************************************")
+                        print("**WARNING : LAST CHANCE ROUND !!!!!!!!!!!!!! **")
+                        print("***********************************************")
+                        print("***********************************************")
+                    if attempts == 5:
+                        print("Not enough good quality images.")
+                        incomplete_classes += 1
+                        break
 
     print("Incomplete clases:", str(incomplete_classes))
     print('Done.')
+
 
 def get_weight_path(model_name):
     '''
@@ -398,6 +848,7 @@ def get_weight_path(model_name):
 
     return path
 
+
 def populate_classes(data_path, model_name, dataset_tag):
     '''
     Obtain the list of classes and saves it as .npy for later use on AWS.
@@ -414,8 +865,8 @@ def populate_classes(data_path, model_name, dataset_tag):
     global classes
     global classes_mapping
 
-    classes_path=os.path.join('../models', 'bottlenecks',  model_name + dataset_tag + '_CLASSES.npy')
-    classes_path_mapping=os.path.join('../models', 'bottlenecks', model_name + dataset_tag + '_CLASSES_MAPPING.npy')
+    classes_path=os.path.join('./models', 'bottlenecks',  model_name + dataset_tag + '_CLASSES.npy')
+    classes_path_mapping=os.path.join('./models', 'bottlenecks', model_name + dataset_tag + '_CLASSES_MAPPING.npy')
 
     if os.path.exists(classes_path) and os.path.exists(classes_path_mapping):
         classes = np.load(classes_path, allow_pickle=True)
@@ -423,12 +874,39 @@ def populate_classes(data_path, model_name, dataset_tag):
     else:
         # Identify labels based on the available folders in the train and test set
         train_test_labels=get_labels(data_path)
+        print('train_test_labels', train_test_labels)
         classes = train_test_labels[0]
         classes_mapping = dict(enumerate(classes))
 
         # Save classes for AWS use
-        np.save(classes_path, classes)
-        np.save(classes_path_mapping, classes_mapping)
+
+        os.makedirs(os.path.dirname(classes_path), exist_ok=True)
+        with open(classes_path, 'wb') as f:
+            np.save(f, classes)
+        with open(classes_path_mapping, 'wb') as f:
+            np.save(f, classes_mapping)
+        print('AWS')
+
+
+def write_csv():
+    header = ['Class_ID', 'Name', 'Sample_Num', 'Flag', 'Gender']
+    data = ['n000001', 'Bruce Willis', 14, 1, 'm']
+
+    with open('some/_litecropped/identity_meta.csv', 'w', encoding='UTF8') as f:
+        writer = csv.writer(f)
+
+        # write the header
+        writer.writerow(header)
+
+        # write the data
+        writer.writerow(data)
+
+        row2 = ['n000002', 'Salma Hayek', 14, 1, 'f']
+        writer.writerow(row2)
+
+        row2 = ['n000003', 'Salma Hayek2', 14, 1, 'f']
+        writer.writerow(row2)
+
 
 def get_labels(data_path, mapfile="identity_meta.csv"):
     '''
@@ -447,10 +925,11 @@ def get_labels(data_path, mapfile="identity_meta.csv"):
     for folder in ['train', 'test']:
         path=os.path.join(data_path, folder)
         ldir=np.array(os.listdir(path))
-        df_mapfile=pd.read_csv(mapfile_path, sep=', ', engine='python', encoding='utf8') # <--- This is because some names have a "," in them
+        df_mapfile=pd.read_csv(mapfile_path, sep=',', engine='python', encoding='utf8')# <--- This is because some names have a "," in them
         res.append(np.array(df_mapfile.loc[df_mapfile['Class_ID'].map(lambda x: x in ldir),'Name'].tolist()))
 
     return res
+
 
 def get_base_model(model_name, from_notebook=True):
     '''
@@ -464,12 +943,12 @@ def get_base_model(model_name, from_notebook=True):
         base model with preset weights
     '''
     if from_notebook:
-        relative = ".."
+        relative = "."
     else:
         relative = "."
 
     weight_path = get_weight_path(model_name)
-    # print('* Loading model weights from: '+path+'...')
+    print('* Loading model weights from: '+weight_path+'...')
     if model_name!="FaceNet":
         model = models_objects[models_catalog.index(model_name)]
     else:
@@ -489,6 +968,7 @@ def get_base_model(model_name, from_notebook=True):
         base_model = model
 
     return base_model
+
 
 def build_network(input_shape, embeddingsize):
     '''
@@ -592,13 +1072,14 @@ def build_quad_model(input_shape, network, metricnetwork, margin, margin2):
     nn_dist = metricnetwork(encoded_nn)
 
     #QuadrupletLoss Layer
-    loss_layer = QuadrupletLossLayer(alpha=margin,beta=margin2,name='4xLoss')([ap_dist,an_dist,nn_dist])
-
+    loss_layer = QuadrupletLossLayer(alpha=margin, beta=margin2, name='4xLoss')([ap_dist, an_dist, nn_dist])
+    print('LOOOOOOOOOS', loss_layer)
     # Connect the inputs with the outputs
     network_train = Model(inputs=[anchor_input,positive_input,negative_input,negative2_input],outputs=loss_layer)
 
     # return the model
     return network_train
+
 
 def plot_history_quad(history, save_path, custom_file_name=""):
     '''
@@ -815,16 +1296,16 @@ def train_quad_siamese(data_dir, test=False, from_notebook=False, verbose=True, 
     ## adjust relative path
     if from_notebook:
         base_weight_path = '.' + get_weight_path(MODEL_BASE_TAG)
-        relative = ".."
+        relative = "."
     else:
         base_weight_path = get_weight_path(MODEL_BASE_TAG)
-        relative = ".."
+        relative = "."
 
     populate_classes(data_dir, MODEL_BASE_TAG, dataset_tag)
 
     train_dir = os.path.join(data_dir, 'train')
     test_dir = os.path.join(data_dir, 'test')
-
+    print('train_dir', train_dir)
     ## initialize datagenerator
     datagen = ImageDataGenerator(rescale=1/255.)
 
@@ -854,12 +1335,14 @@ def train_quad_siamese(data_dir, test=False, from_notebook=False, verbose=True, 
 
     # extract info from generator
     ## extract info from generator
-
+    print('generator_train.filenames', generator_train.filenames)
     train_filenames=generator_train.filenames
     test_filenames=generator_test.filenames
 
     # Save train filename for identification use later on
-    np.save(os.path.join(relative, 'models', 'bottlenecks', MODEL_BASE_TAG + dataset_tag + '_train_filenames.npy'), train_filenames)
+    os.makedirs(os.path.dirname(os.path.join(relative, 'models', 'bottlenecks', MODEL_BASE_TAG + dataset_tag + '_train_filenames.npy')), exist_ok=True)
+    with open(os.path.join(relative, 'models', 'bottlenecks', MODEL_BASE_TAG + dataset_tag + '_train_filenames.npy'), 'wb') as f:
+        np.save(f, train_filenames)
     nb_train_samples = len(train_filenames)
     nb_test_samples = len(test_filenames)
     # print(generator_test.filenames) # ['n000001\\0001_01.jpg', 'n000001\\0002_01.jpg', 'n000001\\0003_01.jpg',
@@ -884,6 +1367,7 @@ def train_quad_siamese(data_dir, test=False, from_notebook=False, verbose=True, 
             steps=num_step_train,
             verbose=1
         )
+        print('bottleneck_features_train', bottleneck_features_train)
         ## save bottleneck weights
         np.save(os.path.join(relative, 'models', 'bottlenecks', MODEL_BASE_TAG + dataset_tag + '_bottleneck_features_train.npy'), bottleneck_features_train)
         del bottleneck_features_train
@@ -971,13 +1455,13 @@ def train_quad_siamese(data_dir, test=False, from_notebook=False, verbose=True, 
     if not os.path.exists(os.path.join(relative,"models")):
         os.mkdir(os.path.join(relative,"models"))
     if not os.path.exists(os.path.join(relative,"models","runs",model_name)):
-        os.mkdir(os.path.join(relative,"models","runs",model_name))
+        os.makedirs(os.path.dirname(os.path.join(relative,"models","runs",model_name)), exist_ok=True)
     if not os.path.exists(os.path.join(relative,"models","runs",model_name,"checkpoints")):
-        os.mkdir(os.path.join(relative,"models","runs",model_name,"checkpoints"))
+        os.makedirs(os.path.dirname(os.path.join(relative,"models","runs",model_name,"checkpoints")), exist_ok=True)
 
     ## OPTIMIZER
     #optimizer = optimizers.Adam(lr=0.05, beta_1=0.9, beta_2=0.999)
-    optimizer = Adam(lr=START_LR)
+    optimizer = Adam(learning_rate=START_LR)
     # optimizer = Adam(lr=0.005)
 
     ## compile model
@@ -988,10 +1472,12 @@ def train_quad_siamese(data_dir, test=False, from_notebook=False, verbose=True, 
     )
 
     # Compute generators
+    print('0000000000', BATCH_SIZE)
     gentrain = generate_quad(train_data, train_labels, batch_size=BATCH_SIZE)
     # gentest = generate_quad(test_data, test_labels, batch_size=BATCH_SIZE)
     gentest=0 # genetest is deprecated.
 
+    print('9999999999', gentrain)
     ## CALLBACKS
     ## progress
     if from_notebook:
@@ -1057,7 +1543,7 @@ def train_quad_siamese(data_dir, test=False, from_notebook=False, verbose=True, 
                         steps_per_epoch=STEPS_PER_EPOCH,
                         # batch_size=BATCH_SIZE,
                         verbose=1,
-                        # validation_data=(test_data, test_labels),
+                        # validation_data=(train_data, train_labels),
                         callbacks=callbacks,
                         # class_weight=dict(enumerate(class_weights))
                         )
@@ -1089,8 +1575,47 @@ def train_quad_siamese(data_dir, test=False, from_notebook=False, verbose=True, 
     ## All finished
     if verbose: print("* Done.")
 
+# =========================================================================================================
+if local:
+    data_path=os.path.join("./some", dataset_tag)
+else:
+    data_path=os.path.join("./datasets", dataset_tag)
 
-source=r"./dataset"
-dest='./some'
-## Generate train set
-get_what_from_full_set_with_face_crop("train", source, dest, max_samples_per_class=10, max_classes=1, mini_res=160)
+
+# SPECIAL SETTING IF GPU MEMORY ISSUES
+if memory_issues:
+    import tensorflow as tf
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+                print("___OK___")
+        except RuntimeError as e:
+            print(e)
+
+if disable_gpu:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+
+# CREATE SUB DATASET FROM VGGFACE2 - RUN ONLY ONCE
+if generate_train_test_sets:
+    ## Get train and test set with face cropping
+    source = './dataset'
+    dest = data_path
+    ## Generate train set
+    get_what_from_full_set_with_face_crop("train", source, dest, \
+                                          max_samples_per_class=10, max_classes=3, mini_res=160)
+    ## Generate test set
+    get_what_from_full_set_with_face_crop("test", source, dest, \
+                                          max_samples_per_class=4, max_classes=3, mini_res=160)
+    write_csv()
+
+### TRAIN MODEL ###
+gc.collect()
+np.set_printoptions(suppress=True)
+##############################################################################
+train_quad_siamese(data_path, test=False, from_notebook=True, \
+                   verbose=True, realistic_method="average")
+##############################################################################
+

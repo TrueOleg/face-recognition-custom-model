@@ -113,7 +113,19 @@ START_LR = 0.001                # Adam default 0.001
 MARGIN = 0.25                   # Use 0.25 for final run
 MARGIN2 = 0.03                  # Use 0.03 for final run
 EMBEDDINGSIZE = 128             # Use 10 final run
-IMAGE_WIDTH, IMAGE_HEIGHT = (160, 160) if MODEL_BASE_TAG=="FaceNet" else (224, 224)
+N_ONESHOTMETRICS = 3 # Parameter not used right now
+IMAGE_WIDTH, IMAGE_HEIGHT = (160, 160) if MODEL_BASE_TAG=="FaceNet" else (224,224)
+CUSTOM_FILE_NAME += \
+    "_B"+str(BATCH_SIZE) + \
+    "_E"+str(EPOCHS) + \
+    "_S"+str(STEPS_PER_EPOCH) + \
+    "_k"+str(k_ONESHOTMETRICS) + \
+    "_lr"+str(START_LR) + \
+    "_M"+str(MARGIN) + \
+    "_MM"+ str(MARGIN2) + \
+    "_em"+str(EMBEDDINGSIZE)
+MODEL_VERSION = \
+    MODEL_BASE_TAG+dataset_tag
 # MODELS CATALOG
 models_catalog=[
     'MobileNetV2',
@@ -587,6 +599,173 @@ def build_quad_model(input_shape, network, metricnetwork, margin, margin2):
 
     # return the model
     return network_train
+
+def plot_history_quad(history, save_path, custom_file_name=""):
+    '''
+    Generate three plots for the siamese model:
+        1. Loss
+        2. Accuracy
+        3. Learning Rate
+
+    Arguments:
+        history: a training history file
+        save_path: disk path for saving resulting png file
+        custom_file_name: name of the output png file (optional)
+
+    Output:
+        A figure representing the 'history' data, saved on disk.
+    '''
+
+    ## create figure
+    fig, axes = plt.subplots(1,3,figsize=(16,6))
+    history[['loss', 'one_shot_loss_train', 'one_shot_loss_realistic']].plot(ax=axes[0], color=['red', 'black', 'green'])
+    axes[0].set_xlabel("Epoch")
+    axes[0].set_title("Losses")
+    axes[0].set_xticks(history.index)
+
+    history[['one_shot_accuracy_train', 'one_shot_accuracy_realistic', 'one_shot_exact_matches_train', 'one_shot_exact_matches_realistic']].plot(ax=axes[1], color=['red', 'green', 'tomato', 'chartreuse'])
+    axes[1].set_xlabel("Epoch")
+    axes[1].set_title("OneShotAccuracy")
+    axes[1].set_xticks(history.index)
+
+    history["lr"].plot(ax=axes[2], color=['green'])
+    axes[2].set_xlabel("Epoch")
+    axes[2].set_title("Learning Rate")
+    axes[2].set_xticks(history.index)
+    plt.tight_layout()
+    plt.savefig(save_path+"/history"+custom_file_name+".png", dpi=150)
+    plt.close('all')
+
+
+def get_quad_batch(set_data, set_labels, batch_size):
+    '''
+    Create batch of batch_size quads, with:
+        - image A: first sample of a random class A
+        - image P: second sample of the same class A (different image though)
+        - image N1: third image of class B with B!=A
+        - image N2: fourth image of class C with C!=A and C!=B
+
+    For each quad, the class is randomly drawn with replacement.
+
+    Arguments:
+        set_data: set (test or train) data (numpy array)
+        set_labels: set (train or test) labels (numpy array)
+        batch_size: desired batch size
+
+    Output:
+        quads: A list of 4 np.arrays to be used for training. Each array is a
+        batch for a type of image (A, P, N1 or N2).
+    '''
+
+    n_classes=set_labels.shape[1]
+    if MODEL_BASE_TAG == 'FaceNet':
+        n_examples,features=set_data.shape
+    else:
+        n_examples,features,t,channels=set_data.shape
+
+    # randomly sample several classes to use in the batch
+    categories = rng.choice(n_classes,size=(batch_size,),replace=True)
+    print('n_examples', n_examples)
+    print('features', features)
+    print('categories', categories)
+    # initialize 2 empty arrays for the input image batch
+    if MODEL_BASE_TAG == 'FaceNet':
+        quads=[np.zeros((batch_size, features)) for i in range(4)]
+    else:
+        quads=[np.zeros((batch_size, features, features, channels)) for i in range(4)]
+
+    # Save actually categories for information
+    actual_categories_0=np.zeros((batch_size,))
+    actual_categories_1=np.zeros((batch_size,))
+    actual_categories_2=np.zeros((batch_size,))
+    actual_categories_3=np.zeros((batch_size,))
+    actual_samples_0=np.zeros((batch_size,))
+    actual_samples_1=np.zeros((batch_size,))
+    actual_samples_2=np.zeros((batch_size,))
+    actual_samples_3=np.zeros((batch_size,))
+    for i in range(batch_size):
+
+        # First image: Anchor - Class A
+        category = categories[i]
+
+        # subset of samples of the right category
+        if MODEL_BASE_TAG == 'FaceNet':
+
+            subset = set_data[set_labels[:,category]==1,:]
+        else:
+            subset = set_data[set_labels[:,category]==1,:,:,:]
+
+        nb_available_samples=subset.shape[0]
+        idx_same_class = rng.choice(nb_available_samples,size=(2,),replace=False)
+        if MODEL_BASE_TAG == 'FaceNet':
+            quads[0][i,:] = subset[idx_same_class[0]]
+        else:
+            quads[0][i,:,:,:] = subset[idx_same_class[0]]
+        actual_categories_0[i]=category
+        actual_samples_0[i]=idx_same_class[0]
+
+        # Second image from same class
+        if MODEL_BASE_TAG == 'FaceNet':
+            quads[1][i,:] = subset[idx_same_class[1]]
+        else:
+            quads[1][i,:,:,:] = subset[idx_same_class[1]]
+        actual_categories_1[i]=category
+        actual_samples_1[i]=idx_same_class[1]
+
+        # Third image from different class
+        classes_left=[c for c in range(n_classes) if c!=category]
+        category_different_class = rng.choice(classes_left,size=(2,),replace=False)
+        if MODEL_BASE_TAG == 'FaceNet':
+            subsetB = set_data[set_labels[:,category_different_class[0]]==1,:]
+        else:
+            subsetB = set_data[set_labels[:,category_different_class[0]]==1,:,:,:]
+        nb_available_samplesB=subsetB.shape[0]
+        idx_classB = rng.randint(0, nb_available_samplesB)
+        if MODEL_BASE_TAG == 'FaceNet':
+            quads[2][i,:] = subsetB[idx_classB]
+        else:
+            quads[2][i,:,:,:] = subsetB[idx_classB]
+        actual_categories_2[i]=category_different_class[0]
+        actual_samples_2[i]=idx_classB
+
+        # Fourth image from another different class
+        if MODEL_BASE_TAG == 'FaceNet':
+            subsetC = set_data[set_labels[:,category_different_class[1]]==1,:]
+        else:
+            subsetC = set_data[set_labels[:,category_different_class[1]]==1,:,:,:]
+        nb_available_samplesC=subsetC.shape[0]
+        idx_classC = rng.randint(0, nb_available_samplesC)
+        if MODEL_BASE_TAG == 'FaceNet':
+            quads[3][i,:] = subsetC[idx_classC]
+        else:
+            quads[3][i,:,:,:] = subsetC[idx_classC]
+        actual_categories_3[i]=category_different_class[1]
+        actual_samples_3[i]=idx_classC
+    # TRUEOLEG FIX
+    fixed_quads = [quads]
+    print('fixed_quads', fixed_quads, type(fixed_quads))
+    return fixed_quads
+
+
+def generate_quad(set_data, set_labels, batch_size):
+    '''
+    A generator for batches, compatible with model.fit_generator.
+
+    Arguments:
+        set_data: set (test or train) data (numpy array)
+        set_labels: set (train or test) labels (numpy array)
+        batch_size: desired batch size
+
+    Output:
+        quads: A list of 4 np.arrays to be used for training. Each array is a
+        batch for a type of image (A, P, N1 or N2).
+
+    '''
+
+    while True:
+        quads = get_quad_batch(set_data, set_labels, batch_size)
+        print('quads', quads[0])
+        yield quads
 
 
 def train_quad_siamese(data_dir, test=False, from_notebook=False, verbose=True, \

@@ -119,6 +119,354 @@ models_weight_paths = [
 ]
 
 
+def make_oneshot_task_realistic(train_data, train_labels, test_data=None, \
+                                test_labels=None, output_labels=0, predict=1, \
+                                predict_model_name=None, image=None):
+    '''
+    Create batch of pairs, one sample from the test set versus ALL samples in ALL classes of train set.
+
+    Arguments:
+        train_data: train data (numpy array), the reference image will be compared
+            to all images contained in that array
+        train_labels: train labels (numpy array)
+        test_data: test data (numpy array), the reference image will be drawn
+            amongst images contained in that array, unless 'image' is provided.
+        test_labels: test labels (numpy array)
+        output_labels: option to print out labels when testing
+        predict: 0 if the function is used for in-training testing,
+                 1 if the function is used for predictions
+        predict_model_name: if predict is 1, name of the 1st encoder. This is
+            to avoid the use of too many global variables.
+        image: a np array representation of an input image, when predict is 1
+
+    Outputs:
+        pairs, actual_categories_1 if predict = 1
+        pairs, targets if predict = 0 and output_labels = 1
+        pairs, targets, actual_categories_1 if predict = 0 and output_labels = 0
+        with:
+            pairs: list of two tensors, one for the tested image (repeated as
+                needed), one for the train set.
+            targets: when the class of the tested image is known, target is a
+                vector containing 1 where the train set is of the same class,
+                0 otherwise.
+            actual_categories_1: returns classes for the train set.
+    '''
+
+    # Obtain the model name differently if running for prediction or not
+    if predict:
+        model_name = predict_model_name
+    else:
+        model_name = MODEL_BASE_TAG
+
+    if len(train_labels.shape) == 1:
+        # AWS one dimension format
+        n_classes = np.unique(train_labels).shape[0]
+    else:
+        # dense matrix format
+        n_classes = train_labels.shape[1]
+
+    if model_name == 'FaceNet':
+        # print(train_data.shape)
+        n_examples, features = train_data.shape
+    else:
+        n_examples, features, t, channels = train_data.shape
+
+    # Select the category whose sample is going to be drawn from
+    category = rng.randint(0, n_classes)
+
+    # initialize 2 empty arrays for the input image batch
+    if model_name == 'FaceNet':
+        pairs = [np.zeros((n_examples, features)) for i in range(2)]
+    else:
+        pairs = [np.zeros((n_examples, features, t, channels)) for i in range(2)]
+
+    # initialize vector for the targets
+    targets = np.zeros((n_examples,))
+
+    # Save actually categories for information
+    actual_categories_0 = np.zeros((n_examples,))
+    actual_categories_1 = np.zeros((n_examples,))
+
+    # Targets are one for same class.
+    if len(train_labels.shape) == 1:
+        # AWS one dimension format
+        targets[train_labels == category] = 1
+    else:
+        # dense matrix format
+        targets[train_labels[:, category] == 1] = 1
+
+    # Select a random test image from the selected category
+    if not predict:
+        if model_name == 'FaceNet':
+            subset0_test = test_data[test_labels[:, category] == 1, :]
+        else:
+            subset0_test = test_data[test_labels[:, category] == 1, :, :, :]
+        nb_available_samples0_test = subset0_test.shape[0]
+        idx_1_test = rng.randint(0, nb_available_samples0_test)
+        sample_image = subset0_test[idx_1_test]
+    elif predict:
+        sample_image = image
+
+    if model_name == 'FaceNet':
+        pairs[0][:, :] = sample_image
+        actual_categories_0[:] = category
+        # actual_id_0[:] = idx_1_test
+
+        pairs[1][:, :] = train_data
+        if len(train_labels.shape) == 1:
+            # AWS one dimension format
+            actual_categories_1[:] = train_labels
+        else:
+            # dense matrix format
+            actual_categories_1[:] = np.argmax(train_labels, axis=1)
+        # actual_id_1[:] =
+    else:
+        pairs[0][:, :, :, :] = sample_image
+        actual_categories_0[:] = category
+        # actual_id_0[:] = idx_1_test
+
+        pairs[1][:, :, :, :] = train_data
+        if len(train_labels.shape) == 1:
+            # AWS one dimension format
+            actual_categories_1[:] = train_labels
+        else:
+            # dense matrix format
+            actual_categories_1[:] = np.argmax(train_labels, axis=1)
+        # actual_id_1[:] =
+
+    if predict:
+        return pairs, actual_categories_1
+
+    if output_labels == 0:
+        return pairs, targets
+    elif output_labels == 1:
+        return pairs, targets, actual_categories_1
+
+
+def compute_learned_dist_one_vs_all(network, metricnetwork, k, train_data, \
+                                    train_labels, test_data=None, test_labels=None, output_labels=1, \
+                                    also_get_loss=0, verbose=1, label="realistic", method="max", \
+                                    predict=0, predict_model_name=None, image=None):
+    '''
+    This function computes the distance (similarity) between one image, either
+    randomly selected from train_data or provided using the'image' argument.
+
+    Arguments:
+        network: encoder network
+        metricnetwork: similarity function
+        k: number of tests, should be 1 if predict is 1
+        train_data: train data (numpy array), the reference image will be compared
+            to all images contained in that array
+        train_labels: train labels (numpy array)
+        test_data: test data (numpy array), the reference image will be drawn
+            amongst images contained in that array
+        test_labels: test labels (numpy array)
+        output_labels: option to print out labels when testing
+        also_get_loss: option to also compute a classic binary cross entripy loss
+        verbose: option to print out details about the execution of the code
+        label: name of the type of testing done. Only use for console prints.
+        method: "max" or "average". Decide how the predicted class will be computed,
+            by either selecting the class corresponding to the image with the smallest
+            distance ("min"), or by selectong the class whose top 3 matches have the
+            smallest average ("average").
+        predict: 0 if the function is used for in-training testing,
+            1 if the function is used for predictions
+        predict_model_name: if predict is 1, name of the 1st encoder. This is
+            to avoid the use of too many global variables.
+        image: a np array representation of an input image, when predict is 1
+
+
+    Outputs:
+        if predict = 1:
+            predicted_cat: the predicted classs
+            distance: the corresponding distance
+            actual_image_index: the index of the matchig image in the train data
+            sorted_predicted_cats: an array of all the predicted_cats, sorted
+                by best match to worse match
+            sorted_distances: an array of all the predicted distances, sorted
+                by best match to worse match
+            sorted_actual_image_index: an array of all images indexes, sorted
+                by best match to worse match
+        if predict = 0:
+                percent_correct: a custom metrics. For each one of the k tests,
+                    the ground truth class is compared to its position in the
+                    sorted predicted classes of the model. For instance, if the
+                    grond truth class is 3, and the model predicts 2, 3, 4, 1,
+                    the percent correct will be 75%. That number is averagged
+                    over all k examples. It gives an idea if a model is improving
+                    or not, as it's a more granular metric that the exact_match
+                    one below.
+                loss: binary cross entropy loss
+                exact_matches: out of the k tests, the percentage of predictions
+                    that were exact.
+
+    '''
+
+    if predict and k != 1:
+        raise Exception("Cannot predict on more than one sample.")
+
+    n_correct = 0
+    if verbose:
+        print("Evaluating model with ({}) 1 test sample vs. all train samples\
+                  using the {} method...".format(str(k), method))
+
+    if also_get_loss:
+        bce = BinaryCrossentropy()
+        loss = 0
+
+    rk_pct_total = 0
+
+    if not predict:
+        print("Rounds completed:", end="\n")
+
+    for i in range(k):
+        gc.collect()
+        if predict:
+            pairs, actual_categories = make_oneshot_task_realistic(train_data, \
+                                                                   train_labels, output_labels=1, predict=1, \
+                                                                   predict_model_name=predict_model_name,
+                                                                   image=image)
+        else:
+            pairs, targets, actual_categories = make_oneshot_task_realistic( \
+                train_data, train_labels, test_data, test_labels, \
+                output_labels=1, predict=0)
+        gc.collect()
+
+        # Get embeddings for the test image
+        test_image_embeddings = network.predict(np.expand_dims(pairs[0][0], axis=0))
+
+        # Create an array to store all embeddings
+        m = pairs[0].shape[0]  # number of comparison to make
+        embeddingsize = test_image_embeddings.shape[1]
+        embeddings = np.zeros((m, embeddingsize * 2))
+
+        train_set_embeddings = network.predict(pairs[1])
+        embeddings[:, embeddingsize:] = train_set_embeddings
+        embeddings[:, :embeddingsize] = test_image_embeddings
+
+        # Get distances
+        distances = metricnetwork(embeddings)
+        distances = np.array(distances)
+        # print(type(distances))
+        # print(distances.shape)
+        last_correct = False
+        del embeddings
+        del pairs
+
+        if method == "min":
+            if not predict:
+                if np.argmin(distances) in np.argwhere(targets == np.amax(targets)):
+                    n_correct += 1
+                    last_correct = True
+            elif predict:
+                arg_min_d = np.argmin(distances)
+                predicted_cat = int(actual_categories[arg_min_d])
+                distance = np.amin(distances)
+                actual_image_index = arg_min_d  # No need to invoke ORDERS, train not shuffled for predict
+
+                # Rank all results
+                sorted_actual_image_index = np.argsort(distances)
+                print(type(sorted_actual_image_index))
+                print(sorted_actual_image_index)
+                sorted_distances = distances[sorted_actual_image_index]
+                sorted_predicted_cats = actual_categories[sorted_actual_image_index].astype(int)
+
+        elif method == "average":
+            # Compute the average per class of the smallest 3 distances
+            avg_per_class = np.zeros(len(np.unique(actual_categories)))
+            unsorted_actual_image_index = np.zeros(len(np.unique(actual_categories)))
+            print_i = 0
+            s_dist = np.argsort(distances)  # <--- sort only one time the whole array
+            for i in range(avg_per_class.shape[0]):
+                mask = actual_categories == i
+                sorted_absolute_arguments_this_class = s_dist[mask[s_dist]]
+                unsorted_actual_image_index[i] = int(sorted_absolute_arguments_this_class[0])
+                sorted_distances_this_class = distances[s_dist][mask[s_dist]]
+                avg_per_class[i] = np.average(sorted_distances_this_class[:3])
+                if print_i <= 30:
+                    # print(mask)
+                    # print(sorted_absolute_arguments_this_class)
+                    # print(sorted_distances_this_class)
+                    # print(avg_per_class[i])
+                    print_i += 1
+
+            sorted_predicted_cats = np.argsort(avg_per_class)  # <--- categories where the average is the lowest
+            sorted_actual_image_index = unsorted_actual_image_index[sorted_predicted_cats].astype(
+                int)  # <--- absolute index of the image with the lowest distance for a given class
+            sorted_distances = avg_per_class[sorted_predicted_cats]  # <---
+
+            predicted_cat = int(np.argmin(avg_per_class))
+            distance = np.min(distances[actual_categories == predicted_cat])
+            if predict:
+                actual_image_index = \
+                    np.where(np.logical_and(actual_categories == predicted_cat, distances == distance))[0][
+                        0]  # No need to invoke ORDERS, train not shuffled for predict
+            if not predict:
+                rk_array = avg_per_class.argsort()
+                target_cat = int(actual_categories[np.argmax(targets)])
+                rk_pct = 100 * np.where(rk_array == target_cat)[0][0] / avg_per_class.shape[0]
+                rk_pct_total += rk_pct
+                print("Rank percentage =", round(100 - rk_pct, 2), end=" ")
+                if predicted_cat == target_cat:
+                    n_correct += 1
+                    last_correct = True
+                else:  # not correct
+                    pass  # no further action needed
+
+        else:
+            raise Exception("Wrong selection technique.")
+
+        if predict:
+            print('SUMMARY OF PREDICTIONS')
+            print("Predicted single cat:", predicted_cat, "Predicted single distance:", \
+                  distance, "Predicted single index:", actual_image_index, \
+                  "##############################", "Predicted categories:", \
+                  sorted_predicted_cats, "Predicted distances:", sorted_distances, \
+                  "Predicted indexes:", sorted_actual_image_index, \
+                  sep="\n")
+            # NOTE:
+            # In case of the AVERAGE technique:
+            # distance is the minimum distance within the predicted class
+            # sorted_distance is the sorted AVERAGE distance per class
+            # Therefore, it is normal than distance !=sorted_distance[0]
+            return predicted_cat, distance, actual_image_index, sorted_predicted_cats, sorted_distances, sorted_actual_image_index
+
+        if also_get_loss:
+            probs = 1 - distances
+            new_loss = bce(targets, probs).numpy()
+            loss += new_loss
+
+        del probs, targets, actual_categories
+
+        # During testing, this allows to quickly see how accurate the model is.
+        if last_correct:
+            print("o")
+        else:
+            print("x")
+    print(" ")
+
+    exact_matches = (100.0 * n_correct / k)
+    percent_correct = 100 - rk_pct_total / k
+
+    if verbose:
+        if label:
+            print(
+                "Got an average of {}% realistic exact matches one-shot learning accuracy on the {} set over {} repetitions.\n".format(
+                    exact_matches, label, k))
+        else:
+            print(
+                "Got an average of {}% realistic exact matches one-shot learning accuracy \n".format(exact_matches))
+
+    if method == "average":
+        print("The average scoring is {}% (0% is best, 100% is worst).".format(round(percent_correct, 0)))
+
+    if also_get_loss:
+        loss = loss / k
+        return percent_correct, loss, exact_matches
+    else:
+        return percent_correct
+
+
 class OneShotMetricsQuad(CB):
     '''
     A custom callback to compute metrics that are very specific to siamese
@@ -275,352 +623,7 @@ class QuadrupletLossLayer(Layer):
 
 class TrainingModule:
 
-    def make_oneshot_task_realistic(self, train_data, train_labels, test_data=None, \
-                                    test_labels=None, output_labels=0, predict=1, \
-                                    predict_model_name=None, image=None):
-        '''
-        Create batch of pairs, one sample from the test set versus ALL samples in ALL classes of train set.
 
-        Arguments:
-            train_data: train data (numpy array), the reference image will be compared
-                to all images contained in that array
-            train_labels: train labels (numpy array)
-            test_data: test data (numpy array), the reference image will be drawn
-                amongst images contained in that array, unless 'image' is provided.
-            test_labels: test labels (numpy array)
-            output_labels: option to print out labels when testing
-            predict: 0 if the function is used for in-training testing,
-                     1 if the function is used for predictions
-            predict_model_name: if predict is 1, name of the 1st encoder. This is
-                to avoid the use of too many global variables.
-            image: a np array representation of an input image, when predict is 1
-
-        Outputs:
-            pairs, actual_categories_1 if predict = 1
-            pairs, targets if predict = 0 and output_labels = 1
-            pairs, targets, actual_categories_1 if predict = 0 and output_labels = 0
-            with:
-                pairs: list of two tensors, one for the tested image (repeated as
-                    needed), one for the train set.
-                targets: when the class of the tested image is known, target is a
-                    vector containing 1 where the train set is of the same class,
-                    0 otherwise.
-                actual_categories_1: returns classes for the train set.
-        '''
-
-        # Obtain the model name differently if running for prediction or not
-        if predict:
-            model_name = predict_model_name
-        else:
-            model_name = MODEL_BASE_TAG
-
-        if len(train_labels.shape) == 1:
-            # AWS one dimension format
-            n_classes = np.unique(train_labels).shape[0]
-        else:
-            # dense matrix format
-            n_classes = train_labels.shape[1]
-
-        if model_name == 'FaceNet':
-            # print(train_data.shape)
-            n_examples, features = train_data.shape
-        else:
-            n_examples, features, t, channels = train_data.shape
-
-        # Select the category whose sample is going to be drawn from
-        category = rng.randint(0, n_classes)
-
-        # initialize 2 empty arrays for the input image batch
-        if model_name == 'FaceNet':
-            pairs = [np.zeros((n_examples, features)) for i in range(2)]
-        else:
-            pairs = [np.zeros((n_examples, features, t, channels)) for i in range(2)]
-
-        # initialize vector for the targets
-        targets = np.zeros((n_examples,))
-
-        # Save actually categories for information
-        actual_categories_0 = np.zeros((n_examples,))
-        actual_categories_1 = np.zeros((n_examples,))
-
-        # Targets are one for same class.
-        if len(train_labels.shape) == 1:
-            # AWS one dimension format
-            targets[train_labels == category] = 1
-        else:
-            # dense matrix format
-            targets[train_labels[:, category] == 1] = 1
-
-        # Select a random test image from the selected category
-        if not predict:
-            if model_name == 'FaceNet':
-                subset0_test = test_data[test_labels[:, category] == 1, :]
-            else:
-                subset0_test = test_data[test_labels[:, category] == 1, :, :, :]
-            nb_available_samples0_test = subset0_test.shape[0]
-            idx_1_test = rng.randint(0, nb_available_samples0_test)
-            sample_image = subset0_test[idx_1_test]
-        elif predict:
-            sample_image = image
-
-        if model_name == 'FaceNet':
-            pairs[0][:, :] = sample_image
-            actual_categories_0[:] = category
-            # actual_id_0[:] = idx_1_test
-
-            pairs[1][:, :] = train_data
-            if len(train_labels.shape) == 1:
-                # AWS one dimension format
-                actual_categories_1[:] = train_labels
-            else:
-                # dense matrix format
-                actual_categories_1[:] = np.argmax(train_labels, axis=1)
-            # actual_id_1[:] =
-        else:
-            pairs[0][:, :, :, :] = sample_image
-            actual_categories_0[:] = category
-            # actual_id_0[:] = idx_1_test
-
-            pairs[1][:, :, :, :] = train_data
-            if len(train_labels.shape) == 1:
-                # AWS one dimension format
-                actual_categories_1[:] = train_labels
-            else:
-                # dense matrix format
-                actual_categories_1[:] = np.argmax(train_labels, axis=1)
-            # actual_id_1[:] =
-
-        if predict:
-            return pairs, actual_categories_1
-
-        if output_labels == 0:
-            return pairs, targets
-        elif output_labels == 1:
-            return pairs, targets, actual_categories_1
-
-    def compute_learned_dist_one_vs_all(self, network, metricnetwork, k, train_data, \
-                                        train_labels, test_data=None, test_labels=None, output_labels=1, \
-                                        also_get_loss=0, verbose=1, label="realistic", method="max", \
-                                        predict=0, predict_model_name=None, image=None):
-
-        '''
-        This function computes the distance (similarity) between one image, either
-        randomly selected from train_data or provided using the'image' argument.
-
-        Arguments:
-            network: encoder network
-            metricnetwork: similarity function
-            k: number of tests, should be 1 if predict is 1
-            train_data: train data (numpy array), the reference image will be compared
-                to all images contained in that array
-            train_labels: train labels (numpy array)
-            test_data: test data (numpy array), the reference image will be drawn
-                amongst images contained in that array
-            test_labels: test labels (numpy array)
-            output_labels: option to print out labels when testing
-            also_get_loss: option to also compute a classic binary cross entripy loss
-            verbose: option to print out details about the execution of the code
-            label: name of the type of testing done. Only use for console prints.
-            method: "max" or "average". Decide how the predicted class will be computed,
-                by either selecting the class corresponding to the image with the smallest
-                distance ("min"), or by selectong the class whose top 3 matches have the
-                smallest average ("average").
-            predict: 0 if the function is used for in-training testing,
-                1 if the function is used for predictions
-            predict_model_name: if predict is 1, name of the 1st encoder. This is
-                to avoid the use of too many global variables.
-            image: a np array representation of an input image, when predict is 1
-
-
-        Outputs:
-            if predict = 1:
-                predicted_cat: the predicted classs
-                distance: the corresponding distance
-                actual_image_index: the index of the matchig image in the train data
-                sorted_predicted_cats: an array of all the predicted_cats, sorted
-                    by best match to worse match
-                sorted_distances: an array of all the predicted distances, sorted
-                    by best match to worse match
-                sorted_actual_image_index: an array of all images indexes, sorted
-                    by best match to worse match
-            if predict = 0:
-                    percent_correct: a custom metrics. For each one of the k tests,
-                        the ground truth class is compared to its position in the
-                        sorted predicted classes of the model. For instance, if the
-                        grond truth class is 3, and the model predicts 2, 3, 4, 1,
-                        the percent correct will be 75%. That number is averagged
-                        over all k examples. It gives an idea if a model is improving
-                        or not, as it's a more granular metric that the exact_match
-                        one below.
-                    loss: binary cross entropy loss
-                    exact_matches: out of the k tests, the percentage of predictions
-                        that were exact.
-
-        '''
-
-        if predict and k != 1:
-            raise Exception("Cannot predict on more than one sample.")
-
-        n_correct = 0
-        if verbose:
-            print("Evaluating model with ({}) 1 test sample vs. all train samples\
-                  using the {} method...".format(str(k), method))
-
-        if also_get_loss:
-            bce = BinaryCrossentropy()
-            loss = 0
-
-        rk_pct_total = 0
-
-        if not predict:
-            print("Rounds completed:", end="\n")
-
-        for i in range(k):
-            gc.collect()
-            if predict:
-                pairs, actual_categories = make_oneshot_task_realistic(train_data, \
-                                                                       train_labels, output_labels=1, predict=1, \
-                                                                       predict_model_name=predict_model_name,
-                                                                       image=image)
-            else:
-                pairs, targets, actual_categories = make_oneshot_task_realistic( \
-                    train_data, train_labels, test_data, test_labels, \
-                    output_labels=1, predict=0)
-            gc.collect()
-
-            # Get embeddings for the test image
-            test_image_embeddings = network.predict(np.expand_dims(pairs[0][0], axis=0))
-
-            # Create an array to store all embeddings
-            m = pairs[0].shape[0]  # number of comparison to make
-            embeddingsize = test_image_embeddings.shape[1]
-            embeddings = np.zeros((m, embeddingsize * 2))
-
-            train_set_embeddings = network.predict(pairs[1])
-            embeddings[:, embeddingsize:] = train_set_embeddings
-            embeddings[:, :embeddingsize] = test_image_embeddings
-
-            # Get distances
-            distances = metricnetwork(embeddings)
-            distances = np.array(distances)
-            # print(type(distances))
-            # print(distances.shape)
-            last_correct = False
-            del embeddings
-            del pairs
-
-            if method == "min":
-                if not predict:
-                    if np.argmin(distances) in np.argwhere(targets == np.amax(targets)):
-                        n_correct += 1
-                        last_correct = True
-                elif predict:
-                    arg_min_d = np.argmin(distances)
-                    predicted_cat = int(actual_categories[arg_min_d])
-                    distance = np.amin(distances)
-                    actual_image_index = arg_min_d  # No need to invoke ORDERS, train not shuffled for predict
-
-                    # Rank all results
-                    sorted_actual_image_index = np.argsort(distances)
-                    print(type(sorted_actual_image_index))
-                    print(sorted_actual_image_index)
-                    sorted_distances = distances[sorted_actual_image_index]
-                    sorted_predicted_cats = actual_categories[sorted_actual_image_index].astype(int)
-
-            elif method == "average":
-                # Compute the average per class of the smallest 3 distances
-                avg_per_class = np.zeros(len(np.unique(actual_categories)))
-                unsorted_actual_image_index = np.zeros(len(np.unique(actual_categories)))
-                print_i = 0
-                s_dist = np.argsort(distances)  # <--- sort only one time the whole array
-                for i in range(avg_per_class.shape[0]):
-                    mask = actual_categories == i
-                    sorted_absolute_arguments_this_class = s_dist[mask[s_dist]]
-                    unsorted_actual_image_index[i] = int(sorted_absolute_arguments_this_class[0])
-                    sorted_distances_this_class = distances[s_dist][mask[s_dist]]
-                    avg_per_class[i] = np.average(sorted_distances_this_class[:3])
-                    if print_i <= 30:
-                        # print(mask)
-                        # print(sorted_absolute_arguments_this_class)
-                        # print(sorted_distances_this_class)
-                        # print(avg_per_class[i])
-                        print_i += 1
-
-                sorted_predicted_cats = np.argsort(avg_per_class)  # <--- categories where the average is the lowest
-                sorted_actual_image_index = unsorted_actual_image_index[sorted_predicted_cats].astype(
-                    int)  # <--- absolute index of the image with the lowest distance for a given class
-                sorted_distances = avg_per_class[sorted_predicted_cats]  # <---
-
-                predicted_cat = int(np.argmin(avg_per_class))
-                distance = np.min(distances[actual_categories == predicted_cat])
-                if predict:
-                    actual_image_index = \
-                        np.where(np.logical_and(actual_categories == predicted_cat, distances == distance))[0][
-                            0]  # No need to invoke ORDERS, train not shuffled for predict
-                if not predict:
-                    rk_array = avg_per_class.argsort()
-                    target_cat = int(actual_categories[np.argmax(targets)])
-                    rk_pct = 100 * np.where(rk_array == target_cat)[0][0] / avg_per_class.shape[0]
-                    rk_pct_total += rk_pct
-                    print("Rank percentage =", round(100 - rk_pct, 2), end=" ")
-                    if predicted_cat == target_cat:
-                        n_correct += 1
-                        last_correct = True
-                    else:  # not correct
-                        pass  # no further action needed
-
-            else:
-                raise Exception("Wrong selection technique.")
-
-            if predict:
-                print('SUMMARY OF PREDICTIONS')
-                print("Predicted single cat:", predicted_cat, "Predicted single distance:", \
-                      distance, "Predicted single index:", actual_image_index, \
-                      "##############################", "Predicted categories:", \
-                      sorted_predicted_cats, "Predicted distances:", sorted_distances, \
-                      "Predicted indexes:", sorted_actual_image_index, \
-                      sep="\n")
-                # NOTE:
-                # In case of the AVERAGE technique:
-                # distance is the minimum distance within the predicted class
-                # sorted_distance is the sorted AVERAGE distance per class
-                # Therefore, it is normal than distance !=sorted_distance[0]
-                return predicted_cat, distance, actual_image_index, sorted_predicted_cats, sorted_distances, sorted_actual_image_index
-
-            if also_get_loss:
-                probs = 1 - distances
-                new_loss = bce(targets, probs).numpy()
-                loss += new_loss
-
-            del probs, targets, actual_categories
-
-            # During testing, this allows to quickly see how accurate the model is.
-            if last_correct:
-                print("o")
-            else:
-                print("x")
-        print(" ")
-
-        exact_matches = (100.0 * n_correct / k)
-        percent_correct = 100 - rk_pct_total / k
-
-        if verbose:
-            if label:
-                print(
-                    "Got an average of {}% realistic exact matches one-shot learning accuracy on the {} set over {} repetitions.\n".format(
-                        exact_matches, label, k))
-            else:
-                print(
-                    "Got an average of {}% realistic exact matches one-shot learning accuracy \n".format(exact_matches))
-
-        if method == "average":
-            print("The average scoring is {}% (0% is best, 100% is worst).".format(round(percent_correct, 0)))
-
-        if also_get_loss:
-            loss = loss / k
-            return percent_correct, loss, exact_matches
-        else:
-            return percent_correct
 
     def get_what_from_full_set_with_face_crop(self, what, data_path_source, data_path_dest, max_samples_per_class=1,
                                               max_classes=None, target_size=(224, 224), mini_res=False):
@@ -652,7 +655,7 @@ class TrainingModule:
         detector = MTCNN()
 
         for source in [train_folder_source, test_folder_source]:
-            print('source', os.listdir(source))
+
             if count_classes == max_classes:
                 break
             for subf in os.listdir(source):
@@ -660,16 +663,18 @@ class TrainingModule:
                     if count_classes == max_classes:
                         break
                     count_classes += 1
-                    print('source, subf', source, subf)
+
                     imdir = os.listdir(os.path.join(source, subf))
                     random.shuffle(imdir)
                     nb_samples = max_samples_per_class
+                    print('IMAGES', imdir)
                     newimdir = imdir
                     os.makedirs(os.path.join(folder_dest, subf), exist_ok=True)
                     # Count files already in destination
                     count = len(os.listdir(os.path.join(folder_dest, subf)))
                     print("Need to transfer {} samples.".format(max(0, nb_samples - count)))
                     print(os.path.join(folder_dest, subf))
+                    print('', count)
                     if count >= nb_samples:
                         total_count += count
                         continue
@@ -844,7 +849,7 @@ class TrainingModule:
             classes_mapping = np.load(classes_path_mapping, allow_pickle=True)
         else:
             # Identify labels based on the available folders in the train and test set
-            train_test_labels = get_labels(data_path)
+            train_test_labels = self.get_labels(data_path)
             print('train_test_labels', train_test_labels)
             classes = train_test_labels[0]
             classes_mapping = dict(enumerate(classes))
@@ -858,7 +863,7 @@ class TrainingModule:
                 np.save(f, classes_mapping)
             print('AWS')
 
-    def get_labels(self, data_path, mapfile="identity_meta.csv"):
+    def get_labels(self, data_path, mapfile="../identity_meta.csv"):
         '''
         Obtains the match between the folder in the train/ test folders and their labels.
 
@@ -897,7 +902,7 @@ class TrainingModule:
         else:
             relative = "."
 
-        weight_path = get_weight_path(model_name)
+        weight_path = self.get_weight_path(model_name)
         print('* Loading model weights from: ' + weight_path + '...')
         if model_name != "FaceNet":
             model = models_objects[models_catalog.index(model_name)]
@@ -914,7 +919,6 @@ class TrainingModule:
                 input_shape=(IMAGE_WIDTH, IMAGE_HEIGHT, 3)
             )
         else:
-            print('BBBBBBBBBBB')
             base_model = model
 
         return base_model
@@ -1196,6 +1200,7 @@ class TrainingModule:
 
     def train_quad_siamese(self,
                            data_dir,
+                           model_id,
                            test=False,
                            from_notebook=False,
                            verbose=True,
@@ -1205,6 +1210,7 @@ class TrainingModule:
 
         Arguments:
             data_dir: location of the train and test folders
+            model_id:
             test: if test, only use 1 epoch and save results in a special directory
             from_notebook: use to update relative paths
             verbose: print progress and step completions
@@ -1312,7 +1318,7 @@ class TrainingModule:
         if not os.path.exists(os.path.join(relative, 'models', 'bottlenecks',
                                            MODEL_BASE_TAG + dataset_tag + '_bottleneck_features_train.npy')):
             if verbose: print("* Creating bottleneck features...")
-            base_model = get_base_model(MODEL_BASE_TAG)
+            base_model = self.get_base_model(MODEL_BASE_TAG)
 
             ## create bottle neck by passing the training data into the base model
             print('   > ', end='')
@@ -1412,7 +1418,7 @@ class TrainingModule:
 
         ## save info about models
         # model_name = re.sub("\.","_",str(MODEL_VERSION))
-        model_name = MODEL_VERSION
+        model_name = MODEL_VERSION + '/' + model_id
 
         ## create directory for version specific
         if not os.path.exists(os.path.join(relative, "models")):
@@ -1539,5 +1545,45 @@ class TrainingModule:
         ## All finished
         if verbose: print("* Done.")
 
-        def training_function(self, files, model):
-            utilities.write_model_dataset(files, model)
+    def training_function(self, files, model):
+        utilities.write_model_dataset(files, model)
+        # =========================================================================================================
+        if local:
+            data_path = os.path.join('./datasets/' + model['_id'], dataset_tag)
+        else:
+            data_path = os.path.join('./datasets/' + model['_id'], dataset_tag)
+
+        # SPECIAL SETTING IF GPU MEMORY ISSUES
+        if memory_issues:
+            import tensorflow as tf
+            gpus = tf.config.experimental.list_physical_devices('GPU')
+            if gpus:
+                try:
+                    for gpu in gpus:
+                        tf.config.experimental.set_memory_growth(gpu, True)
+                        print("___OK___")
+                except RuntimeError as e:
+                    print(e)
+
+        if disable_gpu:
+            os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+        # CREATE SUB DATASET FROM VGGFACE2 - RUN ONLY ONCE
+        if generate_train_test_sets:
+            ## Get train and test set with face cropping
+            source = './datasets/' + model['_id'] + '/base'
+            dest = data_path
+            ## Generate train set
+            self.get_what_from_full_set_with_face_crop("train", source, dest, \
+                                                  max_samples_per_class=10, max_classes=3, mini_res=160)
+            ## Generate test set
+            self.get_what_from_full_set_with_face_crop("test", source, dest, \
+                                                  max_samples_per_class=4, max_classes=3, mini_res=160)
+
+        ### TRAIN MODEL ###
+        gc.collect()
+        np.set_printoptions(suppress=True)
+        ##############################################################################
+        self.train_quad_siamese(data_path, test=False, from_notebook=True, \
+                           verbose=True, realistic_method="average", model_id=model['_id'])
+        ##############################################################################

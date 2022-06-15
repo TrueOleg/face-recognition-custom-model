@@ -21,7 +21,7 @@ def test(data):
     print('data', data['model'])
     socketio.emit('training-process', {'flag': 'in training', '_id': data['model']['_id'], 'status': 'Training in process'})
     training_module.training_function(data['files'], data['model'])
-    # socketio.emit('training-process', {'flag': 'training finished', '_id': data['model']['_id'], 'status': 'Training finished'})
+    socketio.emit('training-process', {'flag': 'training finished', '_id': data['model']['_id'], 'status': 'Training finished'})
 
 
 
@@ -32,4 +32,4 @@ def hello_world():
 
 
 if __name__ == '__main__':
-    socketio.run(app, debug=True, port=4444, host='0.0.0.0')
+    socketio.run(app, debug=False, port=4444, host='0.0.0.0')

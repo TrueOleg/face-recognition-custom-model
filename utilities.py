@@ -28,11 +28,7 @@ class Utilities():
             os.makedirs(test_dataset_path)
 
             for [i, file] in enumerate(files[celeb]):
-                if i < 4:
-                    with open(os.path.join(test_dataset_path, file['name']), 'wb') as fp:
-                        fp.write(file['data'])
-                else:
-                    with open(os.path.join(train_dataset_path, file['name']), 'wb') as fp:
-                        fp.write(file['data'])
+                with open(os.path.join(train_dataset_path, file['name']), 'wb') as fp:
+                    fp.write(file['data'])
 
         self.write_csv(model, csv_data)

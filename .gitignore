@@ -1,5 +1,5 @@
-*.idea
-/datasets/*
+.idea/
+datasets/
 models/bottlenecks/*
 models/runs/*
 tmp/*

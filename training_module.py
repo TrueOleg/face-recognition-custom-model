@@ -623,8 +623,6 @@ class QuadrupletLossLayer(Layer):
 
 class TrainingModule:
 
-
-
     def get_what_from_full_set_with_face_crop(self, what, data_path_source, data_path_dest, max_samples_per_class=1,
                                               max_classes=None, target_size=(224, 224), mini_res=False):
         '''
@@ -1546,7 +1544,7 @@ class TrainingModule:
         if verbose: print("* Done.")
 
     def training_function(self, files, model):
-        utilities.write_model_dataset(files, model)
+        max_classes = utilities.write_model_dataset(files, model)
         # =========================================================================================================
         if local:
             data_path = os.path.join('./datasets/' + model['_id'], dataset_tag)
@@ -1575,10 +1573,10 @@ class TrainingModule:
             dest = data_path
             ## Generate train set
             self.get_what_from_full_set_with_face_crop("train", source, dest, \
-                                                  max_samples_per_class=10, max_classes=3, mini_res=160)
+                                                  max_samples_per_class=10, max_classes=max_classes, mini_res=160)
             ## Generate test set
             self.get_what_from_full_set_with_face_crop("test", source, dest, \
-                                                  max_samples_per_class=4, max_classes=3, mini_res=160)
+                                                  max_samples_per_class=4, max_classes=max_classes, mini_res=160)
 
         ### TRAIN MODEL ###
         gc.collect()

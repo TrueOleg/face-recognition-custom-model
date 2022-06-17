@@ -23,12 +23,11 @@ class Utilities():
             celeb_id = 'n' + str(i)
             csv_data.append([celeb_id, celeb, 14, 1, 'm'])
             train_dataset_path = './datasets/' + model['_id'] + '/base/train/' + celeb_id
-            test_dataset_path = './datasets/' + model['_id'] + '/base/test/' + celeb_id
             os.makedirs(train_dataset_path)
-            os.makedirs(test_dataset_path)
 
             for [i, file] in enumerate(files[celeb]):
                 with open(os.path.join(train_dataset_path, file['name']), 'wb') as fp:
                     fp.write(file['data'])
 
         self.write_csv(model, csv_data)
+        return len(csv_data)

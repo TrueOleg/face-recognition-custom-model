@@ -1,12 +1,14 @@
-from flask import Flask
+from flask import Flask, request
 from flask_cors import CORS
 from flask_socketio import SocketIO
+from predict_module import PredictModule
 from training_module import TrainingModule
 from engineio.payload import Payload
 import os
 import time
 
 training_module = TrainingModule()
+predict_module = PredictModule()
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
@@ -24,10 +26,13 @@ def test(data):
     socketio.emit('training-process', {'flag': 'training finished', '_id': data['model']['_id'], 'status': 'Training finished'})
 
 
+@app.route('/predict', methods=["POST"])
+def predict():
 
-@app.route('/')
-def hello_world():
-    socketio.emit('test', 'data')
+    file = request.files['file']
+    file_path = os.path.join('./tmp', file.filename)
+    file.save(file_path)
+    predict_module.predict(file_path, request.form['model_id'])
     return 'Hello, World!'
 
 
